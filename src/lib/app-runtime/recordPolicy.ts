@@ -26,14 +26,21 @@ export interface RuntimeRecord {
   ownerMemberId: string | null;
 }
 
+const MAX_RECORD_BYTES = 512 * 1024;
+const MAX_TEXT_LENGTH = 64 * 1024;
+const MAX_JSON_DEPTH = 12;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/u;
+
+/**
+ * Entity-specific permission rules override the wildcard rule.
+ * This is important for the UI permissions matrix: an explicit per-entity
+ * restriction must not be silently re-enabled by a global wildcard grant.
+ */
 function roleActions(role: AppRoleConfig, entityId: string): Set<PermissionAction> {
-  const actions = new Set<PermissionAction>();
-  for (const rule of role.permissions) {
-    if (rule.entityId === "*" || rule.entityId === entityId) {
-      for (const action of rule.actions) actions.add(action);
-    }
-  }
-  return actions;
+  const specific = role.permissions.find((rule) => rule.entityId === entityId);
+  const fallback = role.permissions.find((rule) => rule.entityId === "*");
+  return new Set<PermissionAction>((specific ?? fallback)?.actions ?? []);
 }
 
 export function getEntity(config: AppRuntimeConfig, entityKey: string): AppEntityConfig {
@@ -71,28 +78,55 @@ export function requirePermission(
   }
 }
 
+function jsonDepth(value: unknown, depth = 0): number {
+  if (depth > MAX_JSON_DEPTH) return depth;
+  if (value === null || typeof value !== "object") return depth;
+  if (Array.isArray(value)) {
+    return value.reduce((max, item) => Math.max(max, jsonDepth(item, depth + 1)), depth + 1);
+  }
+  return Object.values(value as Record<string, unknown>).reduce(
+    (max, item) => Math.max(max, jsonDepth(item, depth + 1)),
+    depth + 1,
+  );
+}
+
+function isIsoDate(value: string): boolean {
+  if (!ISO_DATE_RE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function isIsoDateTime(value: string): boolean {
+  if (value.length < 16 || value.length > 40) return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime());
+}
+
 function matchesType(type: FieldDataType, value: unknown): boolean {
   if (value === null) return true;
   switch (type) {
     case "text":
+      return typeof value === "string" && value.length <= MAX_TEXT_LENGTH;
     case "select":
     case "status":
+      return typeof value === "string" && value.length <= 512;
     case "date":
+      return typeof value === "string" && isIsoDate(value);
     case "datetime":
-      return typeof value === "string";
+      return typeof value === "string" && isIsoDateTime(value);
     case "number":
       return typeof value === "number" && Number.isFinite(value);
     case "boolean":
       return typeof value === "boolean";
     case "file":
-      return typeof value === "string" || (typeof value === "object" && value !== null);
+      return typeof value === "string" && value.length > 0 && value.length <= 4096;
     case "user":
     case "reference":
-      return typeof value === "string";
+      return typeof value === "string" && UUID_RE.test(value);
     case "json":
-      return typeof value === "object" && value !== null;
+      return typeof value === "object" && value !== null && jsonDepth(value) <= MAX_JSON_DEPTH;
     case "computed":
-      return true;
+      return false;
     default:
       return false;
   }
@@ -100,6 +134,25 @@ function matchesType(type: FieldDataType, value: unknown): boolean {
 
 function writableFields(entity: AppEntityConfig): AppFieldConfig[] {
   return entity.fields.filter((field) => field.type !== "computed" && field.source !== "system");
+}
+
+function validateConfiguredOptions(field: AppFieldConfig, value: unknown): void {
+  if ((field.type !== "select" && field.type !== "status") || value === null || value === undefined) return;
+  if (!field.options || field.options.length === 0) return;
+  if (typeof value !== "string" || !field.options.includes(value)) {
+    throw new AppRuntimePolicyError(
+      "INVALID_OPTION",
+      `Значение поля «${field.label}» отсутствует в разрешённом списке.`,
+    );
+  }
+}
+
+function serializedBytes(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch {
+    throw new AppRuntimePolicyError("INVALID_JSON", "Данные записи невозможно сериализовать.");
+  }
 }
 
 export function validateRecordInput(
@@ -118,6 +171,7 @@ export function validateRecordInput(
     if (!matchesType(field.type, value)) {
       throw new AppRuntimePolicyError("INVALID_FIELD_TYPE", `Некорректный тип поля «${field.label}».`);
     }
+    validateConfiguredOptions(field, value);
     clean[key] = value;
   }
 
@@ -127,6 +181,10 @@ export function validateRecordInput(
         throw new AppRuntimePolicyError("REQUIRED_FIELD", `Поле «${field.label}» обязательно.`);
       }
     }
+  }
+
+  if (serializedBytes(clean) > MAX_RECORD_BYTES) {
+    throw new AppRuntimePolicyError("RECORD_TOO_LARGE", "Запись превышает допустимый размер 512 КБ.");
   }
 
   return clean;
