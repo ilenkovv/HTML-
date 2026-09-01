@@ -16,6 +16,22 @@ export type AiFieldAccess = "none" | "read" | "write" | "read_write";
 export type RelationKind = "one_to_one" | "one_to_many" | "many_to_many";
 export type RegistrationMode = "invite_only" | "admin_created" | "open";
 
+export const APP_CONFIG_LIMITS = {
+  maxEntities: 50,
+  maxFieldsPerEntity: 200,
+  maxRelations: 200,
+  maxRoles: 50,
+  maxAiEventTypes: 100,
+  maxKeyLength: 64,
+  maxLabelLength: 120,
+  maxOptionLength: 200,
+  maxOptionsPerField: 200,
+  maxTextLength: 20_000,
+  maxJsonDepth: 20,
+  maxConfigBytes: 512 * 1024,
+  maxRecordBytes: 512 * 1024,
+} as const;
+
 export type PermissionAction =
   | "view"
   | "create"
@@ -138,7 +154,10 @@ export interface AppConfigValidationIssue {
     | "ai_sensitive_field"
     | "ai_secret_like_field"
     | "missing_default_role"
-    | "multiuser_without_roles";
+    | "multiuser_without_roles"
+    | "limit_exceeded"
+    | "invalid_key"
+    | "invalid_option";
   path: string;
   message: string;
 }
