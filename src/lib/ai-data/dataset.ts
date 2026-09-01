@@ -1,0 +1,18 @@
+import type { DatasetExample, DatasetSplit, DatasetVersionManifest } from "../../types/aiData";
+import { isTrainingEligible } from "./policy";
+export interface DatasetPreparedExample { id: string; input: unknown; output: unknown; metadata: Record<string, unknown>; }
+export interface DatasetBuildResult { eligible: DatasetPreparedExample[]; train: DatasetPreparedExample[]; validation: DatasetPreparedExample[]; }
+function stableHash(value: string): number { let hash = 2166136261; for (let index = 0; index < value.length; index += 1) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619); } return hash >>> 0; }
+export function deterministicSplit(id: string, validationRatio = 0.1): DatasetSplit { if (!(validationRatio >= 0 && validationRatio < 1)) throw new RangeError("validationRatio must be >= 0 and < 1"); const bucket = stableHash(id) / 0xffffffff; return bucket < validationRatio ? "validation" : "train"; }
+export function prepareDataset(examples: readonly DatasetExample[], validationRatio = 0.1): DatasetBuildResult {
+  const eligible = examples.filter(isTrainingEligible).map((example) => ({ id: example.id, input: example.input, output: example.output as unknown, metadata: { projectId: example.projectId, sourceKind: example.sourceKind, sourceId: example.sourceId, qualityScore: example.qualityScore, verifiedBy: example.verifiedBy, verifiedAt: example.verifiedAt, createdAt: example.createdAt, ...example.metadata } })).sort((a, b) => a.id.localeCompare(b.id));
+  const train: DatasetPreparedExample[] = []; const validation: DatasetPreparedExample[] = [];
+  for (const example of eligible) (deterministicSplit(example.id, validationRatio) === "validation" ? validation : train).push(example);
+  return { eligible, train, validation };
+}
+function jsonLine(value: unknown): string { return `${JSON.stringify(value)}\n`; }
+export function examplesToJsonl(examples: readonly DatasetPreparedExample[]): string { return examples.map((example) => jsonLine({ id: example.id, input: example.input, output: example.output, metadata: example.metadata })).join(""); }
+export function examplesToChatJsonl(examples: readonly DatasetPreparedExample[]): string { return examples.map((example) => { const user = typeof example.input === "string" ? example.input : JSON.stringify(example.input); const assistant = typeof example.output === "string" ? example.output : JSON.stringify(example.output); return jsonLine({ messages: [{ role: "user", content: user }, { role: "assistant", content: assistant }] }); }).join(""); }
+function csvEscape(value: unknown): string { const text = typeof value === "string" ? value : JSON.stringify(value); return `"${text.replaceAll('"', '""')}"`; }
+export function examplesToCsv(examples: readonly DatasetPreparedExample[]): string { const header = "id,input,output,metadata\n"; const rows = examples.map((example) => [example.id, example.input, example.output, example.metadata].map(csvEscape).join(",")).join("\n"); return `${header}${rows}${rows ? "\n" : ""}`; }
+export function makeManifest(input: { projectId: string; datasetVersion: number; createdAt: string; trainRatio: number; result: DatasetBuildResult; }): DatasetVersionManifest { return { schemaVersion: 1, projectId: input.projectId, datasetVersion: input.datasetVersion, createdAt: input.createdAt, exampleCount: input.result.eligible.length, trainCount: input.result.train.length, validationCount: input.result.validation.length, trainRatio: input.trainRatio, sourceStatuses: ["training_ready"], formats: ["generic-jsonl", "chat-jsonl", "csv"], note: "В набор включены только подтвержденные записи со статусом training_ready. Секреты и учетные данные не должны попадать в Базу ИИ." }; }
